@@ -1,0 +1,926 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="theme-color" content="#080c10">
+<title>BALLTRACK — Live Speed Detection</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tensorflow/4.17.0/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+<link href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #080c10;
+    --surface: #0d1318;
+    --panel: #111820;
+    --accent: #00e5ff;
+    --accent2: #ff3d57;
+    --accent3: #ffe000;
+    --text: #e8eef4;
+    --muted: #4a6070;
+    --grid: rgba(0,229,255,0.04);
+    --safe-top: env(safe-area-inset-top, 0px);
+    --safe-bottom: env(safe-area-inset-bottom, 0px);
+    --safe-left: env(safe-area-inset-left, 0px);
+    --safe-right: env(safe-area-inset-right, 0px);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { width: 100%; height: 100%; overscroll-behavior: none; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Space Mono', monospace;
+    min-height: 100dvh;
+    overflow-x: hidden;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background-image:
+      linear-gradient(var(--grid) 1px, transparent 1px),
+      linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+    background-size: 40px 40px;
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  /* ── HEADER ── */
+  header {
+    position: sticky; top: 0; z-index: 100;
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 10px 14px;
+    padding-top: calc(10px + var(--safe-top));
+    padding-left: calc(14px + var(--safe-left));
+    padding-right: calc(14px + var(--safe-right));
+    border-bottom: 1px solid rgba(0,229,255,0.12);
+    background: rgba(8,12,16,0.96);
+    -webkit-backdrop-filter: blur(10px);
+    backdrop-filter: blur(10px);
+    gap: 8px;
+  }
+
+  .logo {
+    font-family: 'Bebas Neue', cursive;
+    font-size: 1.5rem; letter-spacing: 0.12em;
+    color: var(--accent);
+    text-shadow: 0 0 16px rgba(0,229,255,0.5);
+    flex-shrink: 0;
+  }
+  .logo span { color: var(--accent2); }
+
+  .header-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+
+  .status-pill {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 0.58rem; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--muted); background: var(--panel);
+    padding: 5px 10px; border-radius: 100px;
+    border: 1px solid rgba(255,255,255,0.06); white-space: nowrap;
+  }
+  .status-dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex-shrink: 0;
+    transition: background 0.3s, box-shadow 0.3s;
+  }
+  .status-dot.live { background: #00e676; box-shadow: 0 0 8px #00e676; animation: pulse 1.5s infinite; }
+
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
+
+  .unit-toggle { display: flex; border: 1px solid rgba(255,255,255,0.1); border-radius: 4px; overflow: hidden; }
+  .unit-btn {
+    padding: 6px 10px; min-width: 44px; min-height: 36px;
+    font-family: 'Space Mono', monospace; font-size: 0.58rem;
+    letter-spacing: 0.08em; text-transform: uppercase; font-weight: 700;
+    background: transparent; color: var(--muted);
+    border: none; border-right: 1px solid rgba(255,255,255,0.08);
+    cursor: pointer; touch-action: manipulation; transition: all 0.15s;
+  }
+  .unit-btn:last-child { border-right: none; }
+  .unit-btn.active { background: var(--accent); color: #000; }
+
+  /* ── MAIN ── */
+  main {
+    position: relative; z-index: 5;
+    display: flex; flex-direction: column; gap: 10px;
+    padding: 10px 12px;
+    padding-bottom: calc(10px + var(--safe-bottom));
+    padding-left: calc(12px + var(--safe-left));
+    padding-right: calc(12px + var(--safe-right));
+    max-width: 680px; margin: 0 auto;
+  }
+
+  /* ── VIDEO ── */
+  .video-wrapper {
+    position: relative; background: var(--surface); border-radius: 8px;
+    overflow: hidden; border: 1px solid rgba(0,229,255,0.12); width: 100%;
+    aspect-ratio: 4/3;
+  }
+  @supports not (aspect-ratio: 4/3) {
+    .video-wrapper { padding-top: 75%; }
+    .video-wrapper > * { position: absolute; top: 0; left: 0; }
+  }
+
+  video {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    object-fit: cover; display: block;
+  }
+  video.mirrored { transform: scaleX(-1); }
+
+  #overlay {
+    position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+    pointer-events: none;
+  }
+
+  .corner-mark { position: absolute; width: 16px; height: 16px; z-index: 10; pointer-events: none; }
+  .corner-mark.tl { top:8px;left:8px; border-top:2px solid var(--accent);border-left:2px solid var(--accent); }
+  .corner-mark.tr { top:8px;right:8px; border-top:2px solid var(--accent);border-right:2px solid var(--accent); }
+  .corner-mark.bl { bottom:8px;left:8px; border-bottom:2px solid var(--accent);border-left:2px solid var(--accent); }
+  .corner-mark.br { bottom:8px;right:8px; border-bottom:2px solid var(--accent);border-right:2px solid var(--accent); }
+
+  .video-overlay-label {
+    position: absolute; top:10px; left:50%; transform:translateX(-50%);
+    background: rgba(8,12,16,0.82); color: var(--accent);
+    font-size: 0.52rem; letter-spacing: 0.18em; text-transform: uppercase;
+    padding: 3px 10px; border-radius: 2px; border: 1px solid rgba(0,229,255,0.22);
+    z-index: 10; white-space: nowrap;
+  }
+
+  .speed-alert {
+    position: absolute; inset: 0; pointer-events: none; opacity: 0;
+    border: 2px solid var(--accent2); box-shadow: 0 0 30px rgba(255,61,87,0.4) inset;
+    border-radius: 8px;
+  }
+  .speed-alert.flash { animation: alertFlash 0.5s ease; }
+  @keyframes alertFlash { 0%,100%{opacity:0} 30%{opacity:1} }
+
+  .no-camera {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 10px;
+    color: var(--muted); font-size: 0.68rem; letter-spacing: 0.05em;
+    text-transform: uppercase; z-index: 5;
+  }
+  .no-camera-icon { font-size: 2rem; opacity: 0.3; }
+
+  /* ── CONTROLS ── */
+  .controls { display: grid; grid-template-columns: 1fr 1fr 56px; gap: 8px; }
+
+  button {
+    font-family: 'Space Mono', monospace; font-size: 0.65rem;
+    letter-spacing: 0.08em; text-transform: uppercase; font-weight: 700;
+    border: none; border-radius: 6px; height: 48px;
+    cursor: pointer; touch-action: manipulation;
+    -webkit-user-select: none; user-select: none;
+    display: flex; align-items: center; justify-content: center; gap: 6px;
+    transition: all 0.15s;
+  }
+
+  .btn-primary { background: var(--accent); color: #000; box-shadow: 0 0 12px rgba(0,229,255,0.25); }
+  .btn-primary:active { background: #fff; transform: scale(0.97); }
+  .btn-danger { background: transparent; color: var(--accent2); border: 1px solid var(--accent2); }
+  .btn-danger:active { background: var(--accent2); color: #fff; }
+  .btn-secondary { background: var(--panel); color: var(--muted); border: 1px solid rgba(255,255,255,0.06); }
+  .btn-secondary:active { color: var(--text); }
+  .btn-icon { background: var(--panel); color: var(--text); border: 1px solid rgba(255,255,255,0.08); font-size: 1.1rem; }
+  .btn-icon:active { background: var(--surface); }
+  button:disabled { opacity: 0.35; pointer-events: none; }
+
+  /* ── SPEED HERO ── */
+  .speed-hero {
+    background: var(--panel); border: 1px solid rgba(255,255,255,0.05);
+    border-radius: 8px; padding: 14px;
+    display: flex; align-items: center; gap: 14px;
+  }
+
+  .speed-ring-wrapper { position: relative; width: 120px; height: 120px; flex-shrink: 0; }
+  .speed-ring-wrapper svg { width: 100%; height: 100%; transform: rotate(-90deg); }
+  .ring-bg { fill: none; stroke: rgba(0,229,255,0.08); stroke-width: 10; }
+  .ring-fill {
+    fill: none; stroke: var(--accent); stroke-width: 10; stroke-linecap: round;
+    stroke-dasharray: 314; stroke-dashoffset: 314;
+    transition: stroke-dashoffset 0.12s ease, stroke 0.2s;
+    filter: drop-shadow(0 0 5px var(--accent));
+  }
+  .speed-center {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+  }
+  .speed-val {
+    font-family: 'Bebas Neue', cursive; font-size: 2.6rem; line-height: 1;
+    color: var(--accent); text-shadow: 0 0 14px rgba(0,229,255,0.5);
+    transition: color 0.2s;
+  }
+  .speed-unit-label { font-size: 0.52rem; letter-spacing: 0.15em; color: var(--muted); text-transform: uppercase; }
+
+  .speed-hero-right { flex: 1; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+
+  .tracking-badge {
+    font-size: 0.55rem; letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--accent); background: rgba(0,229,255,0.08);
+    padding: 4px 10px; border-radius: 3px; border: 1px solid rgba(0,229,255,0.15);
+    align-self: flex-start; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    max-width: 100%;
+  }
+
+  .mini-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+  .stat-cell {
+    background: rgba(0,0,0,0.2); border-radius: 5px; padding: 8px 10px;
+    border: 1px solid rgba(255,255,255,0.04);
+  }
+  .stat-label { font-size: 0.5rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); margin-bottom: 2px; }
+  .stat-value { font-family: 'Bebas Neue', cursive; font-size: 1.6rem; line-height: 1; color: var(--text); }
+  .stat-value.highlight { color: var(--accent3); }
+  .stat-value.danger { color: var(--accent2); }
+
+  /* ── CALIBRATION ── */
+  .calib-card {
+    background: var(--panel); border: 1px solid rgba(255,255,255,0.05);
+    border-radius: 6px; padding: 12px 14px;
+  }
+  .calib-title { font-size: 0.52rem; letter-spacing: 0.15em; text-transform: uppercase; color: var(--muted); margin-bottom: 10px; }
+  .calib-row { display: flex; align-items: center; gap: 10px; }
+  .calib-row span { font-size: 0.58rem; color: var(--muted); white-space: nowrap; }
+
+  /* Large touch-friendly slider for Android */
+  .calib-row input[type=range] {
+    -webkit-appearance: none; appearance: none;
+    flex: 1; height: 4px; background: rgba(0,229,255,0.15);
+    border-radius: 2px; outline: none;
+    padding: 12px 0; margin: -12px 0; /* expand touch area */
+    cursor: pointer;
+  }
+  .calib-row input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 24px; height: 24px; border-radius: 50%;
+    background: var(--accent); cursor: pointer;
+    box-shadow: 0 0 8px rgba(0,229,255,0.4);
+  }
+  .calib-val { font-family: 'Bebas Neue', cursive; font-size: 1.3rem; color: var(--accent); min-width: 34px; text-align: right; }
+  .calib-hint { font-size: 0.52rem; color: var(--muted); margin-top: 8px; letter-spacing: 0.04em; line-height: 1.5; }
+
+  /* ── PANELS ── */
+  .panel-card { background: var(--panel); border: 1px solid rgba(255,255,255,0.05); border-radius: 6px; overflow: hidden; }
+  .panel-header {
+    background: rgba(0,0,0,0.25); padding: 7px 12px;
+    font-size: 0.52rem; letter-spacing: 0.15em; text-transform: uppercase; color: var(--muted);
+    border-bottom: 1px solid rgba(255,255,255,0.04);
+    display: flex; justify-content: space-between; align-items: center;
+  }
+
+  .chart-area { padding: 10px; height: 75px; position: relative; }
+  #historyCanvas { width: 100%; height: 100%; display: block; }
+
+  .obj-list {
+    padding: 6px; display: flex; flex-direction: column; gap: 4px;
+    max-height: 130px; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  }
+  .obj-item {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 10px; background: rgba(0,0,0,0.2);
+    border-radius: 4px; font-size: 0.6rem;
+    border-left: 2px solid transparent;
+  }
+  .obj-item.tracked { border-color: var(--accent); background: rgba(0,229,255,0.05); }
+  .obj-name { color: var(--text); text-transform: capitalize; }
+  .obj-conf { color: var(--muted); }
+  .obj-badge { font-size: 0.48rem; background: var(--accent); color: #000; padding: 2px 6px; border-radius: 2px; font-weight: 700; }
+  .empty-state { padding: 16px; text-align: center; color: var(--muted); font-size: 0.6rem; letter-spacing: 0.06em; }
+
+  .log-box {
+    padding: 8px 12px; max-height: 90px; overflow-y: auto;
+    -webkit-overflow-scrolling: touch; display: flex; flex-direction: column; gap: 2px;
+  }
+  .log-entry { font-size: 0.56rem; letter-spacing: 0.04em; color: var(--muted); display: flex; gap: 8px; }
+  .log-time { color: rgba(0,229,255,0.4); flex-shrink: 0; }
+  .log-speed { color: var(--accent3); }
+
+  /* ── HTTPS WARNING ── */
+  .https-warn {
+    background: rgba(255,61,87,0.1); border: 1px solid rgba(255,61,87,0.3);
+    border-radius: 6px; padding: 12px; font-size: 0.62rem; color: var(--accent2);
+    letter-spacing: 0.04em; line-height: 1.6; display: none;
+  }
+
+  /* ── LOADING ── */
+  #loadingOverlay {
+    position: fixed; inset: 0; background: var(--bg); z-index: 1000;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 20px; transition: opacity 0.4s;
+  }
+  #loadingOverlay.hidden { opacity: 0; pointer-events: none; }
+  .loading-logo {
+    font-family: 'Bebas Neue', cursive; font-size: 2.4rem; letter-spacing: 0.2em;
+    color: var(--accent); text-shadow: 0 0 24px rgba(0,229,255,0.5);
+  }
+  .loading-bar-wrap { width: 180px; height: 2px; background: rgba(0,229,255,0.1); border-radius: 2px; overflow: hidden; }
+  .loading-bar { height: 100%; background: var(--accent); width: 0%; transition: width 0.3s; box-shadow: 0 0 8px var(--accent); }
+  .loading-msg { font-size: 0.6rem; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); text-align: center; padding: 0 24px; }
+</style>
+</head>
+<body>
+
+<div id="loadingOverlay">
+  <div class="loading-logo">BALLTRACK</div>
+  <div class="loading-bar-wrap"><div class="loading-bar" id="loadingBar"></div></div>
+  <div class="loading-msg" id="loadingMsg">Initializing TensorFlow.js…</div>
+</div>
+
+<header>
+  <div class="logo">BALL<span>TRACK</span></div>
+  <div class="header-right">
+    <div class="unit-toggle">
+      <button class="unit-btn active" id="btnKmh" onclick="setUnit('kmh')">km/h</button>
+      <button class="unit-btn" id="btnMph" onclick="setUnit('mph')">mph</button>
+      <button class="unit-btn" id="btnMs" onclick="setUnit('ms')">m/s</button>
+    </div>
+    <div class="status-pill">
+      <div class="status-dot" id="statusDot"></div>
+      <span id="statusText">Init</span>
+    </div>
+  </div>
+</header>
+
+<main>
+
+  <div class="https-warn" id="httpsWarn">
+    ⚠️ Camera requires HTTPS on Android Chrome. Please open this page via a secure (https://) connection.
+  </div>
+
+  <!-- VIDEO -->
+  <div class="video-wrapper" id="videoWrapper">
+    <video id="video" autoplay muted playsinline webkit-playsinline x-webkit-airplay="allow"></video>
+    <canvas id="overlay"></canvas>
+    <div class="corner-mark tl"></div>
+    <div class="corner-mark tr"></div>
+    <div class="corner-mark bl"></div>
+    <div class="corner-mark br"></div>
+    <div class="video-overlay-label" id="overlayLabel">AWAITING CAMERA</div>
+    <div class="speed-alert" id="speedAlert"></div>
+    <div class="no-camera" id="noCameraMsg">
+      <div class="no-camera-icon">📷</div>
+      <div>Camera not started</div>
+      <div style="opacity:0.5;font-size:0.58rem;margin-top:2px">Tap START to begin</div>
+    </div>
+  </div>
+
+  <!-- CONTROLS -->
+  <div class="controls">
+    <button class="btn-primary" id="btnStart" onclick="startCamera()">▶ Start</button>
+    <button class="btn-danger" id="btnStop" onclick="stopCamera()" disabled>■ Stop</button>
+    <button class="btn-icon" id="btnFlip" onclick="flipCamera()" title="Flip Camera">🔄</button>
+  </div>
+  <div style="display:grid;gap:8px;">
+    <button class="btn-secondary" style="width:100%" onclick="resetStats()">↺ Reset Session Stats</button>
+  </div>
+
+  <!-- SPEED HERO -->
+  <div class="speed-hero">
+    <div class="speed-ring-wrapper">
+      <svg viewBox="0 0 110 110">
+        <circle class="ring-bg" cx="55" cy="55" r="50"/>
+        <circle class="ring-fill" id="ringFill" cx="55" cy="55" r="50"/>
+      </svg>
+      <div class="speed-center">
+        <div class="speed-val" id="speedDisplay">0</div>
+        <div class="speed-unit-label" id="unitLabel">km/h</div>
+      </div>
+    </div>
+    <div class="speed-hero-right">
+      <div class="tracking-badge" id="trackingObj">● NO TARGET</div>
+      <div class="mini-stats">
+        <div class="stat-cell">
+          <div class="stat-label">Peak</div>
+          <div class="stat-value highlight" id="peakSpeed">0</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-label">Avg</div>
+          <div class="stat-value" id="avgSpeed">0</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-label">Count</div>
+          <div class="stat-value" id="detectionCount">0</div>
+        </div>
+        <div class="stat-cell">
+          <div class="stat-label">FPS</div>
+          <div class="stat-value danger" id="fpsDisplay">0</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CALIBRATION -->
+  <div class="calib-card">
+    <div class="calib-title">Scene Width Calibration</div>
+    <div class="calib-row">
+      <span>0.5m</span>
+      <input type="range" id="calibRange" min="0.5" max="10" step="0.1" value="3"
+             oninput="updateCalib(this.value)">
+      <span>10m</span>
+      <span class="calib-val" id="calibVal">3.0</span>
+      <span>m</span>
+    </div>
+    <div class="calib-hint">Set how many meters wide your scene is. Higher = faster speed readings.</div>
+  </div>
+
+  <!-- SPEED HISTORY -->
+  <div class="panel-card">
+    <div class="panel-header">
+      <span>Speed History</span>
+      <span id="objCount" style="color:var(--accent);">0 objects</span>
+    </div>
+    <div class="chart-area"><canvas id="historyCanvas"></canvas></div>
+  </div>
+
+  <!-- DETECTED OBJECTS -->
+  <div class="panel-card">
+    <div class="panel-header"><span>Detected Objects</span></div>
+    <div class="obj-list" id="objList">
+      <div class="empty-state">No objects detected</div>
+    </div>
+  </div>
+
+  <!-- SPEED LOG -->
+  <div class="panel-card">
+    <div class="panel-header"><span>Speed Log</span></div>
+    <div class="log-box" id="speedLog">
+      <div class="log-entry" style="justify-content:center">
+        <span style="opacity:0.4">Waiting for data…</span>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<script>
+// ─── STATE ───────────────────────────────────────────────────────────────────
+let model = null;
+let stream = null;
+let animFrame = null;
+let isRunning = false;
+let useFrontCamera = false;
+let wakeLock = null;
+
+let unit = 'kmh';
+const MAX_SPEED = { kmh: 200, mph: 125, ms: 56 };
+// r=50 in SVG → circumference = 2π×50 ≈ 314
+const CIRC = 2 * Math.PI * 50;
+
+let prevPositions = {};
+let prevTimestamps = {};
+let lastSpeedByKey = {};
+let speedHistory = [];
+const HISTORY_LEN = 60;
+
+let peakSpeed = 0;
+let totalSpeed = 0;
+let speedSamples = 0;
+let detectionCount = 0;
+let realWorldWidth = 3.0;
+
+// FPS tracking via rAF timestamp
+let lastRafTime = 0;
+let fpsSmooth = 0;
+
+const BALL_CLASSES = ['sports ball', 'frisbee', 'orange', 'apple'];
+
+// ─── LOADING ─────────────────────────────────────────────────────────────────
+async function loadModel() {
+  if (location.protocol !== 'https:' &&
+      location.hostname !== 'localhost' &&
+      location.hostname !== '127.0.0.1') {
+    document.getElementById('httpsWarn').style.display = 'block';
+  }
+
+  const bar = document.getElementById('loadingBar');
+  const msg = document.getElementById('loadingMsg');
+
+  try {
+    msg.textContent = 'Starting TensorFlow.js…';
+    bar.style.width = '15%';
+    await tf.ready();
+
+    // Try WebGL first (GPU acceleration on Android)
+    try { await tf.setBackend('webgl'); } catch(e) { /* fall back to CPU */ }
+    msg.textContent = 'Backend: ' + tf.getBackend().toUpperCase();
+    bar.style.width = '35%';
+
+    msg.textContent = 'Downloading COCO-SSD model…';
+    bar.style.width = '50%';
+    model = await cocoSsd.load({ base: 'lite_mobilenet_v2' });
+
+    bar.style.width = '100%';
+    msg.textContent = 'Ready!';
+    await new Promise(r => setTimeout(r, 350));
+    document.getElementById('loadingOverlay').classList.add('hidden');
+    setStatus('Ready', false);
+    document.getElementById('btnStart').disabled = false;
+  } catch(e) {
+    msg.textContent = 'Load error: ' + e.message;
+    bar.style.background = 'var(--accent2)';
+    bar.style.width = '100%';
+  }
+}
+
+// ─── CAMERA ──────────────────────────────────────────────────────────────────
+async function startCamera() {
+  const video = document.getElementById('video');
+  try {
+    if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+
+    // Android Chrome requires specific constraints for rear camera
+    const constraints = {
+      video: {
+        facingMode: useFrontCamera ? 'user' : { ideal: 'environment' },
+        width:  { ideal: 1280, max: 1920 },
+        height: { ideal: 720,  max: 1080 },
+        frameRate: { ideal: 30, max: 60 }
+      },
+      audio: false
+    };
+
+    stream = await navigator.mediaDevices.getUserMedia(constraints);
+    video.srcObject = stream;
+    video.classList.toggle('mirrored', useFrontCamera);
+
+    // Android sometimes needs an explicit play() call after srcObject assignment
+    await new Promise((resolve, reject) => {
+      video.onloadedmetadata = resolve;
+      video.onerror = (e) => reject(new Error('Video error: ' + e.type));
+      setTimeout(() => reject(new Error('Camera metadata timeout')), 10000);
+    });
+    try { await video.play(); } catch(e) { /* already playing is fine */ }
+
+    syncCanvasToVideo();
+    isRunning = true;
+
+    document.getElementById('noCameraMsg').style.display = 'none';
+    document.getElementById('btnStart').disabled = true;
+    document.getElementById('btnStop').disabled = false;
+    setStatus('Live', true);
+    setOverlayLabel('DETECTING…');
+
+    acquireWakeLock();
+
+    lastRafTime = performance.now();
+    animFrame = requestAnimationFrame(detectLoop);
+  } catch(e) {
+    let errMsg = 'Camera error: ' + e.message;
+    if (e.name === 'NotAllowedError')   errMsg = 'Camera permission denied. Allow camera in Chrome Settings > Site Settings.';
+    if (e.name === 'NotFoundError')     errMsg = 'No camera found on this device.';
+    if (e.name === 'NotReadableError')  errMsg = 'Camera busy — close other apps using it and try again.';
+    if (e.name === 'OverconstrainedError') errMsg = 'Camera does not support requested resolution. Try again.';
+    setStatus('Error', false);
+    alert(errMsg);
+  }
+}
+
+function stopCamera() {
+  isRunning = false;
+  if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; }
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  releaseWakeLock();
+
+  const video = document.getElementById('video');
+  video.srcObject = null;
+  document.getElementById('noCameraMsg').style.display = 'flex';
+  document.getElementById('btnStart').disabled = false;
+  document.getElementById('btnStop').disabled = true;
+  setStatus('Stopped', false);
+  setOverlayLabel('CAMERA OFF');
+  clearOverlay();
+  prevPositions = {}; prevTimestamps = {}; lastSpeedByKey = {};
+}
+
+async function flipCamera() {
+  useFrontCamera = !useFrontCamera;
+  if (isRunning) {
+    stopCamera();
+    await new Promise(r => setTimeout(r, 400));
+    await startCamera();
+  }
+}
+
+function syncCanvasToVideo() {
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('overlay');
+  if (video.videoWidth > 0 && video.videoHeight > 0) {
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+  }
+}
+
+// ─── WAKE LOCK ────────────────────────────────────────────────────────────────
+async function acquireWakeLock() {
+  if ('wakeLock' in navigator) {
+    try {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } catch(e) { /* not critical */ }
+  }
+}
+function releaseWakeLock() {
+  if (wakeLock) { try { wakeLock.release(); } catch(e){} wakeLock = null; }
+}
+
+// Page visibility: Android Chrome suspends background tabs
+document.addEventListener('visibilitychange', () => {
+  if (!isRunning) return;
+  if (document.visibilityState === 'hidden') {
+    if (animFrame) { cancelAnimationFrame(animFrame); animFrame = null; }
+  } else {
+    acquireWakeLock();
+    lastRafTime = performance.now();
+    animFrame = requestAnimationFrame(detectLoop);
+  }
+});
+
+// ─── DETECTION LOOP ───────────────────────────────────────────────────────────
+async function detectLoop(rafTs) {
+  if (!isRunning) return;
+
+  // Smooth FPS using rAF timestamps (avoids performance.now() drift on Android)
+  const dt = rafTs - lastRafTime;
+  lastRafTime = rafTs;
+  if (dt > 0) fpsSmooth = fpsSmooth * 0.85 + (1000 / dt) * 0.15;
+
+  const video = document.getElementById('video');
+  // readyState 2 = HAVE_CURRENT_DATA, ensures frame is available
+  if (video.readyState >= 2 && model) {
+    // Sync canvas if video size changed (orientation change on Android)
+    if (video.videoWidth !== document.getElementById('overlay').width) syncCanvasToVideo();
+
+    let preds = [];
+    try { preds = await model.detect(video); } catch(e) { /* skip frame */ }
+
+    drawDetections(preds, video, rafTs);
+    updateUI(preds, rafTs);
+  }
+
+  animFrame = requestAnimationFrame(detectLoop);
+}
+
+// ─── DRAWING ──────────────────────────────────────────────────────────────────
+function drawDetections(preds, video, now) {
+  const canvas = document.getElementById('overlay');
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // Canvas is in video-pixel space; layout CSS scales it visually
+  preds.forEach(pred => {
+    const isBall = isBallClass(pred.class);
+    const [x, y, w, h] = pred.bbox;
+    const cx = x + w / 2, cy = y + h / 2;
+
+    // Compute speed (updates prevPositions internally)
+    const speedMs = computeSpeed(pred.class, cx, cy, now, video);
+
+    // Box
+    ctx.strokeStyle = isBall ? '#00e5ff' : 'rgba(255,255,255,0.22)';
+    ctx.lineWidth = isBall ? 2.5 : 1.5;
+    ctx.strokeRect(x, y, w, h);
+
+    if (isBall) {
+      // Crosshair
+      ctx.strokeStyle = 'rgba(0,229,255,0.75)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(cx - 14, cy); ctx.lineTo(cx + 14, cy);
+      ctx.moveTo(cx, cy - 14); ctx.lineTo(cx, cy + 14);
+      ctx.stroke();
+    }
+
+    // Class label — clamp to stay inside canvas
+    ctx.fillStyle = isBall ? '#00e5ff' : 'rgba(255,255,255,0.4)';
+    ctx.font = isBall ? 'bold 15px monospace' : '12px monospace';
+    const lx = Math.min(x + 4, canvas.width - 120);
+    const ly = y > 20 ? y - 5 : y + h + 16;
+    ctx.fillText(`${pred.class} ${Math.round(pred.score * 100)}%`, lx, ly);
+
+    // Speed badge below box
+    if (isBall && speedMs > 0.2) {
+      ctx.fillStyle = speedMs > speedThreshold() ? '#ff3d57' : '#ffe000';
+      ctx.font = 'bold 17px monospace';
+      ctx.fillText(formatSpeed(speedMs), x + 4, y + h + 20);
+    }
+  });
+}
+
+function clearOverlay() {
+  const canvas = document.getElementById('overlay');
+  canvas.getContext('2d').clearRect(0, 0, canvas.width, canvas.height);
+}
+
+// ─── SPEED CALCULATION ────────────────────────────────────────────────────────
+function computeSpeed(cls, cx, cy, nowMs, video) {
+  const key = cls + '_0';
+  if (prevPositions[key]) {
+    const dt = (nowMs - prevTimestamps[key]) / 1000;
+    if (dt < 0.008) return lastSpeedByKey[key] || 0; // skip if <8ms
+
+    const vw = video.videoWidth  || 1;
+    const vh = video.videoHeight || 1;
+    const dx = (cx - prevPositions[key].x) / vw;
+    const dy = (cy - prevPositions[key].y) / vh;
+    const dist = Math.sqrt(dx * dx + dy * dy) * realWorldWidth; // meters
+    const spd = dist / dt; // m/s
+
+    lastSpeedByKey[key] = spd;
+    prevPositions[key] = { x: cx, y: cy };
+    prevTimestamps[key] = nowMs;
+    return spd;
+  } else {
+    prevPositions[key] = { x: cx, y: cy };
+    prevTimestamps[key] = nowMs;
+    return 0;
+  }
+}
+
+// ─── UI UPDATE ────────────────────────────────────────────────────────────────
+function updateUI(preds, now) {
+  document.getElementById('fpsDisplay').textContent = Math.round(fpsSmooth);
+  document.getElementById('objCount').textContent = preds.length + ' obj';
+  updateObjList(preds);
+
+  const balls = preds.filter(p => isBallClass(p.class));
+
+  if (balls.length > 0) {
+    const ball = balls[0];
+    const key = ball.class + '_0';
+    const speedMs = lastSpeedByKey[key] || 0;
+    const displaySpeed = msToDisplay(speedMs);
+    const rounded = Math.round(displaySpeed);
+
+    const pct = Math.min(displaySpeed / MAX_SPEED[unit], 1);
+    const ring = document.getElementById('ringFill');
+    ring.style.strokeDashoffset = CIRC * (1 - pct);
+    const ringColor = pct > 0.75 ? 'var(--accent2)' : pct > 0.45 ? 'var(--accent3)' : 'var(--accent)';
+    ring.style.stroke = ringColor;
+
+    const sEl = document.getElementById('speedDisplay');
+    sEl.textContent = rounded;
+    sEl.style.color = ringColor;
+
+    document.getElementById('trackingObj').textContent = '● ' + ball.class.toUpperCase();
+
+    if (speedMs > 0.3) {
+      detectionCount++;
+      document.getElementById('detectionCount').textContent = detectionCount;
+
+      if (displaySpeed > peakSpeed) {
+        peakSpeed = displaySpeed;
+        document.getElementById('peakSpeed').textContent = Math.round(peakSpeed);
+        flashAlert();
+      }
+
+      totalSpeed += displaySpeed;
+      speedSamples++;
+      document.getElementById('avgSpeed').textContent = Math.round(totalSpeed / speedSamples);
+
+      speedHistory.push(displaySpeed);
+      if (speedHistory.length > HISTORY_LEN) speedHistory.shift();
+      drawHistory();
+
+      if (detectionCount % 10 === 0) addLog(rounded);
+    }
+
+    setOverlayLabel('TRACKING: ' + ball.class.toUpperCase());
+  } else {
+    document.getElementById('speedDisplay').textContent = '0';
+    document.getElementById('speedDisplay').style.color = 'var(--accent)';
+    const ring = document.getElementById('ringFill');
+    ring.style.strokeDashoffset = CIRC;
+    ring.style.stroke = 'var(--accent)';
+    document.getElementById('trackingObj').textContent = '● NO TARGET';
+    if (isRunning) setOverlayLabel('SCANNING…');
+  }
+}
+
+function updateObjList(preds) {
+  const list = document.getElementById('objList');
+  if (!preds.length) {
+    list.innerHTML = '<div class="empty-state">No objects detected</div>';
+    return;
+  }
+  list.innerHTML = preds.map(p => {
+    const ball = isBallClass(p.class);
+    return `<div class="obj-item ${ball ? 'tracked' : ''}">
+      <span class="obj-name">${p.class}</span>
+      <span class="obj-conf">${Math.round(p.score * 100)}%</span>
+      ${ball ? '<span class="obj-badge">TRACKING</span>' : ''}
+    </div>`;
+  }).join('');
+}
+
+function drawHistory() {
+  const canvas = document.getElementById('historyCanvas');
+  const parent = canvas.parentElement;
+  const W = parent.clientWidth - 20;
+  const H = parent.clientHeight - 20;
+  if (W <= 0 || H <= 0 || speedHistory.length < 2) return;
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, W, H);
+
+  const maxV = Math.max(...speedHistory, 1);
+  const pts = speedHistory.map((v, i) => ({
+    x: (i / (HISTORY_LEN - 1)) * W,
+    y: H - (v / maxV) * (H - 6) - 3
+  }));
+
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, 'rgba(0,229,255,0.2)');
+  grad.addColorStop(1, 'rgba(0,229,255,0)');
+  ctx.beginPath();
+  ctx.moveTo(pts[0].x, H);
+  pts.forEach(p => ctx.lineTo(p.x, p.y));
+  ctx.lineTo(pts[pts.length - 1].x, H);
+  ctx.closePath();
+  ctx.fillStyle = grad;
+  ctx.fill();
+
+  ctx.beginPath();
+  ctx.strokeStyle = '#00e5ff';
+  ctx.lineWidth = 2;
+  pts.forEach((p, i) => i === 0 ? ctx.moveTo(p.x, p.y) : ctx.lineTo(p.x, p.y));
+  ctx.stroke();
+}
+
+function addLog(speed) {
+  const log = document.getElementById('speedLog');
+  const t = new Date().toLocaleTimeString('en', { hour12: false });
+  const entry = document.createElement('div');
+  entry.className = 'log-entry';
+  entry.innerHTML = `<span class="log-time">${t}</span><span class="log-speed">${speed} ${document.getElementById('unitLabel').textContent}</span>`;
+  log.insertBefore(entry, log.firstChild);
+  while (log.children.length > 30) log.removeChild(log.lastChild);
+}
+
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
+function isBallClass(cls) { return BALL_CLASSES.includes(cls); }
+
+function msToDisplay(ms) {
+  if (unit === 'kmh') return ms * 3.6;
+  if (unit === 'mph') return ms * 2.237;
+  return ms;
+}
+
+function formatSpeed(ms) {
+  return Math.round(msToDisplay(ms)) + ' ' + document.getElementById('unitLabel').textContent;
+}
+
+function speedThreshold() { return { kmh: 10, mph: 6, ms: 3 }[unit]; }
+
+function setStatus(text, live) {
+  document.getElementById('statusText').textContent = text;
+  document.getElementById('statusDot').classList.toggle('live', live);
+}
+
+function setOverlayLabel(t) { document.getElementById('overlayLabel').textContent = t; }
+
+function flashAlert() {
+  const el = document.getElementById('speedAlert');
+  el.classList.remove('flash');
+  void el.offsetWidth;
+  el.classList.add('flash');
+}
+
+function setUnit(u) {
+  unit = u;
+  ['kmh','mph','ms'].forEach(k => {
+    document.getElementById('btn' + k.charAt(0).toUpperCase() + k.slice(1))
+      .classList.toggle('active', k === u);
+  });
+  document.getElementById('unitLabel').textContent = { kmh:'km/h', mph:'mph', ms:'m/s' }[u];
+  peakSpeed = 0; totalSpeed = 0; speedSamples = 0;
+  document.getElementById('peakSpeed').textContent = '0';
+  document.getElementById('avgSpeed').textContent = '0';
+  speedHistory = [];
+}
+
+function updateCalib(v) {
+  realWorldWidth = parseFloat(v);
+  document.getElementById('calibVal').textContent = parseFloat(v).toFixed(1);
+}
+
+function resetStats() {
+  peakSpeed = 0; totalSpeed = 0; speedSamples = 0; detectionCount = 0;
+  speedHistory = []; prevPositions = {}; prevTimestamps = {}; lastSpeedByKey = {};
+  ['peakSpeed','avgSpeed','detectionCount'].forEach(id => {
+    document.getElementById(id).textContent = '0';
+  });
+  document.getElementById('speedLog').innerHTML =
+    '<div class="log-entry" style="justify-content:center"><span style="opacity:0.4">Waiting for data…</span></div>';
+  clearOverlay();
+  drawHistory();
+}
+
+// ─── INIT ─────────────────────────────────────────────────────────────────────
+document.getElementById('btnStart').disabled = true;
+loadModel();
+</script>
+</body>
+</html>
